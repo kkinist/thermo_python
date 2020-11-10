@@ -1,0 +1,6 @@
+MASS	20.006230	 
+GHZ	628.23	 
+AVIB	4138.73	90.05 
+#AVIB	4138.73	90.05 10000  # truncate at 10,000 cm-1 (instead of auto)
+SYMNO	1	 
+ELEC	1	0.0
