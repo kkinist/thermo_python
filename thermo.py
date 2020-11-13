@@ -18,16 +18,21 @@ Karl Irikura, NIST, karl.irikura@nist.gov
 import sys, re, os
 import numpy as np
 
+PRESS = 1.0e5              # Pa (standard pressure is 1 bar; change to 101325. for 1 atm)
 # CODATA 2018 constants from physics.nist.gov, retrieved 7/13/2020
 AVOGAD = 6.02214076e23     # mol^-1 (exact, defined value)
 BOLTZ = 1.380649e-23       # J/K (exact, defined value)
 RGAS = AVOGAD * BOLTZ      # J/mol/K (exact)
 PLANCK = 6.62607015e-34    # J s (exact, defined value)
 CLIGHT = 299792458.        # m/s (exact, defined value)
-PRESS = 1.0e5              # Pa (standard pressure is 1 bar; change to 101325. for 1 atm)
 CM2KJ = PLANCK * AVOGAD * CLIGHT / 10  # convert from cm^-1 to kJ/mol
 CM2K = 100 * CLIGHT * PLANCK / BOLTZ   # convert from cm^-1 to Kelvin
 AMU = 1.66053906660e-27     # kg/u
+HARTREE = 4.3597447222071e-18 # J; uncertainty is 85 in last two digits
+AU2CM = 2.1947463136320e05   # Hartree in cm^-1; unc. is 43 in last two digits
+AU2KJMOL = HARTREE * AVOGAD / 1000.  # Hartree in kJ/mol
+CALORIE = 4.184            # multipy cal * CALORIE to get J
+ATM_KPA = 101.325          # convert pressure in atm to kPa
 
 # list of irregular temperatures to include in output table
 specialt = [298.15]
@@ -343,12 +348,13 @@ def avib_limit(avib):
         print('** Error: we =', w, 'must be positive')
         sys.exit(1)
     if x <= 0:
-        print('** Warning: wexe =', w, 'should probably be positive')
-    vmax = w // (2*x) - 1
+        print('** Warning: wexe =', x, 'should probably be positive')
+    vmax = int(w / (2*x) - 0.5)
     emax = w*vmax - x*vmax*(vmax + 1)
     if emax < 0:
         # anharmonicity is negative
         emax = 20 * 1000   # arbitrary upper limit (cm-1)
+        print('** Warning: using arbitrary upper limit for negative anharmonicity')
     if len(avib) > 2:
         ulim = avib[2]  # user's upper limit
         # replace user's limit if it's too low or too high
@@ -370,7 +376,46 @@ def avib_vlim(avib):
     vlim = (w - x - np.sqrt(d)) // (2 * x)
     return vlim
 ##
-
+def Gauthermo(gaussout, silent=False):
+    # if the input file is from Gaussian, extract the reported
+    # values of ZPE, ddH, S, and Cp
+    # print these values (unless 'silent') and return them as a dict
+    # use last occurrences only 
+    rx_Tp = re.compile(r'^ Temperature\s+(\d+\.\d+) Kelvin.  Pressure\s+(\d+\.\d+) Atm')
+    rx_zpe = re.compile(r'^ Zero-point correction= ')
+    rx_H = re.compile(r'^ Thermal correction to Enthalpy= ')
+    rx_func = re.compile(r'^\s+E \(Thermal\)\s+CV\s+S\s*$')
+    rx_funcdat = re.compile(r'^ (TOTAL|Total)\s+\d+\.\d+')
+    infunc = False
+    zpe = None
+    with open(gaussout) as FGAU:
+        for line in FGAU:
+            m = rx_Tp.match(line)
+            if m:
+                # read temperature and pressure
+                T = float(m.group(1))
+                p = float(m.group(2)) * ATM_KPA  # convert from atm to kPa
+            if rx_zpe.match(line):
+                zpe = float(line.split()[2]) # Hartree
+            if rx_H.match(line):
+                enth = float(line.split()[-1]) # Hartree
+                ddH = (enth - zpe) * AU2KJMOL
+            if infunc:
+                if rx_funcdat.match(line):
+                    words = line.split()
+                    Cv = float(words[2]) * CALORIE
+                    Cp = Cv + RGAS
+                    S = float(words[3]) * CALORIE
+            if rx_func.match(line):
+                infunc = True
+    if not silent:
+        print('** Gaussian using T = {:.3f} K, p = {:.3f} kPa'.format(T, p))
+        print('** Gaussian ZPE = {:.1f} cm^-1'.format(zpe * AU2CM))
+        print('** Gaussian ddH = {:.3f} kJ/mol'.format(ddH))
+        print('** Gaussian Cp = {:.3f} J/K.mol'.format(Cp))
+        print('** Gaussian S = {:.3f} J/K.mol\n'.format(S))       
+    return {'Gau_ZPE': zpe * AU2CM, 'Gau_ddH': ddH, 'Gau_Cp': Cp, 
+            'Gau_S': S}
 ############## read the command line
 if len(sys.argv) < 2:
     sys.exit('\tUsage: python thermo.py [gaufreq_output_file|data_file] <freq scale factor> <temperature> <NOSAVE>')
@@ -514,7 +559,14 @@ with open(finp, 'r') as FINP:
             # only Gaussian files include atom count
             n = int(m.group(1))
             natom = max(n, natom)
-            
+
+# To retrieve the thermochemistry reported by Gaussian, change 'False' to
+#   'True' in the following statement
+if False:
+    if intype == 'gau':
+        # see what Gaussian thinks
+        Gau_therm = Gauthermo(finp)
+
 # atom, linear, or nonlinear?
 # for linear, rot = [ghz] (one element)
 if len(rot) == 3:
@@ -585,16 +637,16 @@ if natom == 0:
 if len(freq):
     print('Harmonic vibrational frequencies (cm^-1):')
     if scale != 1:
-        print('\tunscaled\tscaled')
+        print('    unscaled    scaled')
     else:
-        print('\tunscaled')
+        print('    unscaled')
 rawfreq = np.array(freq)
 freq = scale * rawfreq
 for i, fr in enumerate(freq):
     if scale == 1:
-        print('{:3d}\t{:6.1f}'.format(i+1, fr))
+        print('{:3d}  {:7.1f}'.format(i+1, fr))
     else:
-        print('{:3d}\t{:6.1f}\t\t{:6.1f}'.format(i+1, rawfreq[i], fr))
+        print('{:3d}  {:7.1f}   {:7.1f}'.format(i+1, rawfreq[i], fr))
     if (fr == 0):
         print('\t*** Vibrational frequencies cannot be zero!')
         sys.exit(1)
@@ -608,18 +660,18 @@ if len(el_energy) == 0:
     el_energy = [0.]
 else:
     print('Electronic states:')
-    print('\tdegen\tcm^-1\tkJ/mol')
+    print('    degen   cm^-1   kJ/mol')
     for i, (d, e) in enumerate(zip(el_degen, el_energy)):
-        print('{:3d}\t{:2d}\t{:.1f}\t{:.2f}'.format(i+1, d, e, e * CM2KJ))
+        print('{:3d}  {:2d}     {:.1f}     {:.2f}'.format(i+1, d, e, e * CM2KJ))
 
 # any anharmonic oscillators
 if len(avibs):
     print('Anharmonic oscillators (cm^-1):')
-    print('\twe\twexe\ttruncation')
+    print('       we      wexe   truncation (should not exceed dissociation energy)')
     for i, avib in enumerate(avibs):
         # install upper limit if missing
         avib_limit(avib)  # modifies avib in-place
-        print('{:3d}\t{:.1f}\t{:.1f}\t{:.1f}'.format(i+1, *avib))
+        print('{:3d}  {:7.1f} {:6.1f}   {:.1f}'.format(i+1, *avib))
 
 # any explicit energy ladder
 if len(xvib):
@@ -681,7 +733,7 @@ while t <= tmax:
     t += tstep
 tlist.sort()
 
-print('\nT (K)\tS (J/K/mol)\tCp (J/K/mol)\tddH (kJ/mol)')
+print('  T/K    S/(J/K.mol)  Cp/(J/K.mol)  ddH/(kJ/mol)')
 for T in tlist:
     # loop over temperatures
     # get lnQ and its derivatives for the total partition function
@@ -692,6 +744,6 @@ for T in tlist:
     # add them
     dlnQ = [dlnQ_rrho[d] + dlnQ_elec[d] + dlnQ_avib[d] + dlnQ_xvib[d] for d in [0,1,2]]
     x = thermo_lnQ(T, dlnQ)
-    print('{:.2f}\t{:.3f}\t\t{:.3f}\t\t{:.3f}'.format(T, *x))
+    print('{:7.2f}  {:9.3f}   {:9.3f}    {:9.3f}'.format(T, *x))
 
 #test_derivs(1000, freq, rot, symno, el_degen, el_energy, avibs, xvib, dT=0.1)
